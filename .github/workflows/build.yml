@@ -173,6 +173,12 @@ jobs:
                   }
                   root.addView(cbDouble)
                   root.addView(cbLong)
+                  val cbProx = CheckBox(this).apply {
+                      text = "প্রক্সিমিটি সেন্সর: ফোন বাজার সময় ফোন কানে নিলে বা সেন্সরের ওপর হাত রাখলে রিসিভ"
+                      isChecked = Prefs.proximity(this@MainActivity)
+                      setOnCheckedChangeListener { _, v -> Prefs.setProximity(this@MainActivity, v) }
+                  }
+                  root.addView(cbProx)
                   val cbDebug = CheckBox(this).apply {
                       text = "পরীক্ষা মোড (প্রতি চাপে মেসেজ দেখাও)"
                       isChecked = Prefs.debug(this@MainActivity)
@@ -226,7 +232,7 @@ jobs:
 
                   root.addView(label("পরীক্ষা করুন", 17f, true))
                   root.addView(
-                      label("অন্য ফোন থেকে কল দিন। বাজার সময় ভলিউম বাটন দুইবার দ্রুত চাপুন বা চেপে ধরুন। কল রিসিভ হলে হালকা ভাইব্রেশন হবে।", 14f)
+                      label("অন্য ফোন থেকে কল দিন। বাজার সময় ভলিউম বাটন দুইবার দ্রুত চাপুন বা চেপে ধরুন। কল রিসিভ হলে হালকা ভাইব্রেশন হবে।\n\nপ্রক্সিমিটি: ফোন পকেট বা টেবিলে থাকলে প্রথমে হাতে তুলুন (সেন্সর খোলা), তারপর কানের কাছে নিন বা সেন্সরের ওপর হাত রাখুন। সেন্সর সাধারণত স্ক্রিনের উপরে কানের স্পিকারের কাছে থাকে।", 14f)
                   )
               }
 
@@ -289,6 +295,9 @@ jobs:
               fun setDebug(c: Context, v: Boolean) = sp(c).edit().putBoolean("debug", v).apply()
               fun log(c: Context): String = sp(c).getString("log", "") ?: ""
               fun setLog(c: Context, s: String) = sp(c).edit().putString("log", s).apply()
+
+              fun proximity(c: Context): Boolean = sp(c).getBoolean("proximity", true)
+              fun setProximity(c: Context, v: Boolean) = sp(c).edit().putBoolean("proximity", v).apply()
           }
           PB_END_OF_FILE
           mkdir -p 'app/src/main/java/com/volumeanswer/app'
@@ -298,7 +307,15 @@ jobs:
           import android.Manifest
           import android.accessibilityservice.AccessibilityService
           import android.annotation.SuppressLint
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
           import android.content.pm.PackageManager
+          import android.hardware.Sensor
+          import android.hardware.SensorEvent
+          import android.hardware.SensorEventListener
+          import android.hardware.SensorManager
           import android.os.Handler
           import android.os.Looper
           import android.os.SystemClock
@@ -320,6 +337,56 @@ jobs:
               private var swallow = false
               private val longRunnable = Runnable { answer() }
 
+              // ---- Proximity sensor answering ----
+              private var sensorManager: SensorManager? = null
+              private var listening = false
+              private var wasFar = false
+              private val proxAnswer = Runnable { answer() }
+
+              private val phoneReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context, intent: Intent) {
+                      val st = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
+                      if (st == TelephonyManager.EXTRA_STATE_RINGING) startProximity() else stopProximity()
+                  }
+              }
+
+              private val proxListener = object : SensorEventListener {
+                  override fun onSensorChanged(e: SensorEvent) {
+                      val near = e.values[0] < minOf(5f, e.sensor.maximumRange)
+                      if (!near) {
+                          wasFar = true
+                          handler.removeCallbacks(proxAnswer)
+                      } else if (wasFar) {
+                          // Phone was away, now covered/at the ear: answer if it stays near briefly.
+                          handler.removeCallbacks(proxAnswer)
+                          handler.postDelayed(proxAnswer, 400L)
+                      }
+                  }
+
+                  override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+              }
+
+              private fun startProximity() {
+                  if (!Prefs.proximity(this) || listening) return
+                  val sm = sensorManager ?: return
+                  val sensor = sm.getDefaultSensor(Sensor.TYPE_PROXIMITY)
+                  if (sensor == null) {
+                      note("এই ফোনে প্রক্সিমিটি সেন্সর পাওয়া যায়নি")
+                      return
+                  }
+                  wasFar = false
+                  listening = sm.registerListener(proxListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+                  if (listening) note("প্রক্সিমিটি সেন্সর চালু: ফোন কানে নিন")
+              }
+
+              private fun stopProximity() {
+                  handler.removeCallbacks(proxAnswer)
+                  if (listening) {
+                      sensorManager?.unregisterListener(proxListener)
+                      listening = false
+                  }
+              }
+
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
               override fun onInterrupt() {
@@ -328,7 +395,22 @@ jobs:
 
               override fun onServiceConnected() {
                   super.onServiceConnected()
+                  sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
+                  try {
+                      registerReceiver(phoneReceiver, IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED))
+                  } catch (e: Exception) {
+                  }
                   note("সার্ভিস চালু হয়েছে")
+                  if (isRinging()) startProximity()
+              }
+
+              override fun onDestroy() {
+                  stopProximity()
+                  try {
+                      unregisterReceiver(phoneReceiver)
+                  } catch (e: Exception) {
+                  }
+                  super.onDestroy()
               }
 
               private fun note(msg: String) {
@@ -411,6 +493,7 @@ jobs:
                       val tm = getSystemService(TELECOM_SERVICE) as TelecomManager
                       tm.acceptRingingCall()
                       note("রিসিভ কমান্ড পাঠানো হয়েছে")
+                      stopProximity()
                       buzz()
                   } catch (e: Exception) {
                       note("রিসিভ ব্যর্থ: ${e.javaClass.simpleName}")
