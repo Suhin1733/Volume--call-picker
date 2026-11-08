@@ -1,26 +1,528 @@
 name: Build APK
+
 on:
   push:
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Unzip project
-        run: unzip -o project.zip -d proj
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Generate project files
+        run: |
+          mkdir -p 'app'
+          cat > 'app/build.gradle.kts' <<'PB_END_OF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.volumeanswer.app"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.volumeanswer.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main'
+          cat > 'app/src/main/AndroidManifest.xml' <<'PB_END_OF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+              <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".VolumeAnswerService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main/java/com/volumeanswer/app'
+          cat > 'app/src/main/java/com/volumeanswer/app/MainActivity.kt' <<'PB_END_OF_FILE'
+          package com.volumeanswer.app
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Typeface
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.View
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.LinearLayout
+          import android.widget.RadioButton
+          import android.widget.RadioGroup
+          import android.widget.ScrollView
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              private lateinit var statusView: TextView
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun label(text: String, size: Float = 15f, bold: Boolean = false): TextView =
+                  TextView(this).apply {
+                      this.text = text
+                      textSize = size
+                      if (bold) setTypeface(typeface, Typeface.BOLD)
+                      setPadding(0, dp(10), 0, dp(4))
+                  }
+
+              private fun button(text: String, onClick: () -> Unit): Button =
+                  Button(this).apply {
+                      this.text = text
+                      setOnClickListener { onClick() }
+                  }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(20), dp(20), dp(20), dp(30))
+                  }
+                  val scroll = ScrollView(this)
+                  scroll.addView(root)
+                  setContentView(scroll)
+
+                  root.addView(label("ভলিউম কল রিসিভ", 26f, true))
+                  root.addView(label("ফোন বাজার সময় ভলিউম বাটন চেপে কল রিসিভ করুন। স্ক্রিনে হাত দিতে হবে না।"))
+
+                  statusView = label("", 15f, true)
+                  root.addView(statusView)
+
+                  root.addView(label("ধাপ ১: অনুমতি", 17f, true))
+                  root.addView(button("ফোনের অনুমতি দিন") {
+                      requestPermissions(
+                          arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS),
+                          1
+                      )
+                  })
+
+                  root.addView(label("ধাপ ২: Accessibility সার্ভিস চালু করুন", 17f, true))
+                  root.addView(label("খোলা পেজে \"ভলিউম কল রিসিভ\" খুঁজে চাপুন, তারপর চালু (On) করুন।", 13f))
+                  root.addView(button("Accessibility সেটিংস খুলুন") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+
+                  root.addView(label("ধাপ ৩: কীভাবে রিসিভ হবে", 17f, true))
+                  val cbDouble = CheckBox(this).apply {
+                      text = "ডাবল প্রেস (দুইবার দ্রুত চাপ)"
+                      isChecked = Prefs.doublePress(this@MainActivity)
+                      setOnCheckedChangeListener { _, v -> Prefs.setDoublePress(this@MainActivity, v) }
+                  }
+                  val cbLong = CheckBox(this).apply {
+                      text = "লং প্রেস (চেপে ধরে রাখা)"
+                      isChecked = Prefs.longPress(this@MainActivity)
+                      setOnCheckedChangeListener { _, v -> Prefs.setLongPress(this@MainActivity, v) }
+                  }
+                  root.addView(cbDouble)
+                  root.addView(cbLong)
+                  val cbDebug = CheckBox(this).apply {
+                      text = "পরীক্ষা মোড (প্রতি চাপে মেসেজ দেখাও)"
+                      isChecked = Prefs.debug(this@MainActivity)
+                      setOnCheckedChangeListener { _, v -> Prefs.setDebug(this@MainActivity, v) }
+                  }
+                  root.addView(cbDebug)
+
+                  root.addView(label("কোন বাটন কাজ করবে", 15f, true))
+                  val rbUp = RadioButton(this).apply { text = "ভলিউম আপ (+)"; id = View.generateViewId() }
+                  val rbDown = RadioButton(this).apply { text = "ভলিউম ডাউন (−)"; id = View.generateViewId() }
+                  val rbBoth = RadioButton(this).apply { text = "দুটোই"; id = View.generateViewId() }
+                  val rg = RadioGroup(this).apply {
+                      orientation = RadioGroup.VERTICAL
+                      addView(rbUp)
+                      addView(rbDown)
+                      addView(rbBoth)
+                  }
+                  root.addView(rg)
+                  rg.check(
+                      when (Prefs.keyMode(this)) {
+                          0 -> rbUp.id
+                          1 -> rbDown.id
+                          else -> rbBoth.id
+                      }
+                  )
+                  rg.setOnCheckedChangeListener { _, id ->
+                      val mode = when (id) {
+                          rbUp.id -> 0
+                          rbDown.id -> 1
+                          else -> 2
+                      }
+                      Prefs.setKeyMode(this, mode)
+                  }
+
+                  root.addView(label("Redmi / MIUI-তে জরুরি সেটিং", 17f, true))
+                  root.addView(
+                      label(
+                          "১) অ্যাপের সেটিংসে গিয়ে Autostart চালু করুন।\n" +
+                              "২) Battery saver → \"No restrictions\" দিন।\n" +
+                              "৩) Recent apps খুলে এই অ্যাপের কার্ডটি চেপে ধরে Lock করুন।\n" +
+                              "এগুলো না করলে MIUI সার্ভিসটি বন্ধ করে দিতে পারে।\n\n" +
+                              "Accessibility চালু করা না গেলে (Android 13+): অ্যাপের সেটিংসে ওপরের ডানের তিন ডট (⋮) চেপে \"Allow restricted settings\" দিন।",
+                          14f
+                      )
+                  )
+                  root.addView(button("অ্যাপের সেটিংস খুলুন") {
+                      startActivity(
+                          Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+                      )
+                  })
+
+                  root.addView(label("পরীক্ষা করুন", 17f, true))
+                  root.addView(
+                      label("অন্য ফোন থেকে কল দিন। বাজার সময় ভলিউম বাটন দুইবার দ্রুত চাপুন বা চেপে ধরুন। কল রিসিভ হলে হালকা ভাইব্রেশন হবে।", 14f)
+                  )
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  refresh()
+              }
+
+              private fun hasPerms(): Boolean =
+                  checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED &&
+                      checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED
+
+              private fun serviceEnabled(): Boolean {
+                  val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+                  return enabled.contains("$packageName/")
+              }
+
+              private fun refresh() {
+                  val perm = hasPerms()
+                  val svc = serviceEnabled()
+                  val permText = if (perm) "✅ দেওয়া আছে" else "❌ বাকি"
+                  val svcText = if (svc) "✅ চালু" else "❌ বন্ধ"
+                  val tail = if (perm && svc) {
+                      "সব ঠিক আছে! কেউ কল দিলে ভলিউম বাটন চেপে রিসিভ করুন।"
+                  } else {
+                      "নিচের ধাপগুলো সম্পন্ন করুন।"
+                  }
+                  val last = Prefs.log(this).ifEmpty { "কিছু নেই" }
+                  statusView.text = "ফোনের অনুমতি: $permText\nAccessibility সার্ভিস: $svcText\nশেষ ঘটনা: $last\n\n$tail"
+              }
+          }
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main/java/com/volumeanswer/app'
+          cat > 'app/src/main/java/com/volumeanswer/app/Prefs.kt' <<'PB_END_OF_FILE'
+          package com.volumeanswer.app
+
+          import android.content.Context
+
+          object Prefs {
+              private const val NAME = "settings"
+
+              private fun sp(c: Context) = c.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+
+              fun doublePress(c: Context): Boolean = sp(c).getBoolean("double", true)
+              fun longPress(c: Context): Boolean = sp(c).getBoolean("long", true)
+
+              /** 0 = Volume Up only, 1 = Volume Down only, 2 = both */
+              fun keyMode(c: Context): Int = sp(c).getInt("key", 2)
+
+              fun setDoublePress(c: Context, v: Boolean) = sp(c).edit().putBoolean("double", v).apply()
+              fun setLongPress(c: Context, v: Boolean) = sp(c).edit().putBoolean("long", v).apply()
+              fun setKeyMode(c: Context, v: Int) = sp(c).edit().putInt("key", v).apply()
+
+              fun debug(c: Context): Boolean = sp(c).getBoolean("debug", true)
+              fun setDebug(c: Context, v: Boolean) = sp(c).edit().putBoolean("debug", v).apply()
+              fun log(c: Context): String = sp(c).getString("log", "") ?: ""
+              fun setLog(c: Context, s: String) = sp(c).edit().putString("log", s).apply()
+          }
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main/java/com/volumeanswer/app'
+          cat > 'app/src/main/java/com/volumeanswer/app/VolumeAnswerService.kt' <<'PB_END_OF_FILE'
+          package com.volumeanswer.app
+
+          import android.Manifest
+          import android.accessibilityservice.AccessibilityService
+          import android.annotation.SuppressLint
+          import android.content.pm.PackageManager
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.os.VibrationEffect
+          import android.os.Vibrator
+          import android.telecom.TelecomManager
+          import android.telephony.TelephonyManager
+          import android.view.KeyEvent
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Toast
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          class VolumeAnswerService : AccessibilityService() {
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var lastDown = 0L
+              private var swallow = false
+              private val longRunnable = Runnable { answer() }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {
+                  handler.removeCallbacks(longRunnable)
+              }
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  note("সার্ভিস চালু হয়েছে")
+              }
+
+              private fun note(msg: String) {
+                  val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+                  Prefs.setLog(this, "$t  $msg")
+                  if (Prefs.debug(this)) {
+                      try {
+                          Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
+
+              override fun onKeyEvent(event: KeyEvent): Boolean {
+                  val code = event.keyCode
+                  if (code != KeyEvent.KEYCODE_VOLUME_UP && code != KeyEvent.KEYCODE_VOLUME_DOWN) return false
+
+                  val ringing = isRinging()
+                  if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                      val key = if (code == KeyEvent.KEYCODE_VOLUME_UP) "আপ" else "ডাউন"
+                      note("ভলিউম $key চাপ পেয়েছি | কল বাজছে: ${if (ringing) "হ্যাঁ" else "না"}")
+                  }
+
+                  val mode = Prefs.keyMode(this)
+                  if (mode == 0 && code != KeyEvent.KEYCODE_VOLUME_UP) return false
+                  if (mode == 1 && code != KeyEvent.KEYCODE_VOLUME_DOWN) return false
+
+                  // Only react while the phone is ringing; otherwise volume keys work normally.
+                  if (!ringing) {
+                      handler.removeCallbacks(longRunnable)
+                      lastDown = 0L
+                      return false
+                  }
+
+                  if (event.action == KeyEvent.ACTION_DOWN) {
+                      if (event.repeatCount > 0) return swallow
+                      val now = SystemClock.uptimeMillis()
+                      handler.removeCallbacks(longRunnable)
+                      if (Prefs.doublePress(this) && lastDown != 0L && now - lastDown <= DOUBLE_MS) {
+                          // Second quick press: answer and swallow this press.
+                          lastDown = 0L
+                          swallow = true
+                          answer()
+                          return true
+                      }
+                      // First press: let the system handle it (silences ringer/vibration),
+                      // but remember it so a quick second press can answer the call.
+                      lastDown = now
+                      swallow = false
+                      if (Prefs.longPress(this)) handler.postDelayed(longRunnable, LONG_MS)
+                      return false
+                  } else if (event.action == KeyEvent.ACTION_UP) {
+                      handler.removeCallbacks(longRunnable)
+                      if (swallow) {
+                          swallow = false
+                          return true
+                      }
+                  }
+                  return false
+              }
+
+              @Suppress("DEPRECATION")
+              private fun isRinging(): Boolean {
+                  return try {
+                      val tm = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
+                      tm.callState == TelephonyManager.CALL_STATE_RINGING
+                  } catch (e: SecurityException) {
+                      note("READ_PHONE_STATE অনুমতি নেই")
+                      false
+                  }
+              }
+
+              @SuppressLint("MissingPermission")
+              private fun answer() {
+                  if (checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) != PackageManager.PERMISSION_GRANTED) {
+                      note("ANSWER_PHONE_CALLS অনুমতি নেই")
+                      return
+                  }
+                  try {
+                      val tm = getSystemService(TELECOM_SERVICE) as TelecomManager
+                      tm.acceptRingingCall()
+                      note("রিসিভ কমান্ড পাঠানো হয়েছে")
+                      buzz()
+                  } catch (e: Exception) {
+                      note("রিসিভ ব্যর্থ: ${e.javaClass.simpleName}")
+                  }
+              }
+
+              @Suppress("DEPRECATION")
+              private fun buzz() {
+                  try {
+                      val v = getSystemService(VIBRATOR_SERVICE) as Vibrator
+                      v.vibrate(VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE))
+                  } catch (e: Exception) {
+                  }
+              }
+
+              companion object {
+                  private const val DOUBLE_MS = 500L
+                  private const val LONG_MS = 600L
+              }
+          }
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main/res/drawable'
+          cat > 'app/src/main/res/drawable/ic_launcher_foreground.xml' <<'PB_END_OF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M44,28 L64,28 Q68,28 68,32 L68,76 Q68,80 64,80 L44,80 Q40,80 40,76 L40,32 Q40,28 44,28 Z" />
+              <path
+                  android:fillColor="#1B8A5A"
+                  android:pathData="M46,36 L62,36 L62,68 L46,68 Z" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M50,48 L54,52 L60,44 L62,46 L54,56 L48,50 Z" />
+          </vector>
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main/res/mipmap-anydpi'
+          cat > 'app/src/main/res/mipmap-anydpi/ic_launcher.xml' <<'PB_END_OF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main/res/values'
+          cat > 'app/src/main/res/values/ic_launcher_background.xml' <<'PB_END_OF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">#1B8A5A</color>
+          </resources>
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main/res/values'
+          cat > 'app/src/main/res/values/strings.xml' <<'PB_END_OF_FILE'
+          <resources>
+              <string name="app_name">ভলিউম কল রিসিভ</string>
+              <string name="service_desc">ফোন বাজার সময় ভলিউম বাটন চেপে কল রিসিভ করার জন্য এই সার্ভিস ভলিউম বাটনের চাপ শনাক্ত করে। অন্য কোনো তথ্য পড়ে না বা সংগ্রহ করে না।</string>
+          </resources>
+          PB_END_OF_FILE
+          mkdir -p 'app/src/main/res/xml'
+          cat > 'app/src/main/res/xml/accessibility_service_config.xml' <<'PB_END_OF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRequestFilterKeyEvents"
+              android:canRequestFilterKeyEvents="true"
+              android:description="@string/service_desc"
+              android:notificationTimeout="100" />
+          PB_END_OF_FILE
+          cat > 'build.gradle.kts' <<'PB_END_OF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          PB_END_OF_FILE
+          cat > 'gradle.properties' <<'PB_END_OF_FILE'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          PB_END_OF_FILE
+          cat > 'settings.gradle.kts' <<'PB_END_OF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "VolumeAnswer"
+          include(":app")
+          PB_END_OF_FILE
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-      - name: Build
-        working-directory: proj
-        run: gradle assembleDebug --no-daemon
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
       - uses: actions/upload-artifact@v4
         with:
           name: VolumeAnswer-APK
-          path: proj/app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
